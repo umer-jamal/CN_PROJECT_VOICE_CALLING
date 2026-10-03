@@ -1,0 +1,11 @@
+# Ignore SSL Certificates
+*.pem
+*.key
+
+# Ignore Node dependencies
+node_modules/
+package-lock.json
+
+# Ignore system files
+.DS_Store
+Thumbs.db
