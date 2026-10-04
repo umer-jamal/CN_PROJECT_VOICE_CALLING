@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta name="theme-color" content="#101727">
+	<title>Voice Calling</title>
+	<style>
+		:root { color-scheme: dark; font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif; background: #101727; color: #eef2ff; }
+		* { box-sizing: border-box; }
+		body { min-height: 100vh; margin: 0; padding: 24px; display: grid; place-items: center; background: radial-gradient(ellipse at 50% 0%, #293b59, #101727 60%); }
+		main { width: min(100%, 460px); padding: clamp(28px, 7vw, 48px); text-align: center; background: #172133; border: 1px solid #ffffff20; border-radius: 24px; box-shadow: 0 24px 80px #0006; }
+		.icon { width: 72px; height: 72px; margin: 0 auto 22px; display: grid; place-items: center; border-radius: 22px; color: #e5edff; background: linear-gradient(145deg, #527fe0, #293e6a); }
+		.icon svg { width: 32px; height: 32px; }
+		h1 { margin: 0; font-size: clamp(1.7rem, 6vw, 2.1rem); letter-spacing: -.04em; }
+		.subtitle { margin: 10px 0 26px; color: #aab6cb; line-height: 1.5; }
+		.status { display: inline-flex; align-items: center; gap: 9px; margin-bottom: 28px; padding: 9px 14px; border: 1px solid #ffffff20; border-radius: 999px; color: #c0cadd; background: #ffffff08; font-size: .88rem; font-weight: 600; }
+		.dot { width: 8px; height: 8px; border-radius: 50%; background: #8793a8; }
+		.status[data-state="connected"] .dot { background: #58d6a3; box-shadow: 0 0 12px #58d6a366; }
+		.status[data-state="active"] .dot { background: #74a6ff; box-shadow: 0 0 12px #74a6ff88; }
+		.status[data-state="incoming"] .dot { background: #ffcb68; box-shadow: 0 0 12px #ffcb6888; }
+		.status[data-state="error"] .dot { background: #ff7777; }
+		.controls { display: grid; gap: 12px; }
+		button { min-height: 50px; padding: 13px 18px; border: 1px solid transparent; border-radius: 13px; color: #eef2ff; background: #28364e; font: inherit; font-weight: 650; cursor: pointer; transition: transform .15s, background .15s, opacity .15s; }
+		button:not(:disabled):hover { transform: translateY(-1px); background: #344662; }
+		button:focus-visible { outline: 3px solid #8fb5ff; outline-offset: 3px; }
+		button:disabled { opacity: .42; cursor: not-allowed; }
+		#startButton { background: #527fe0; }
+		#startButton:not(:disabled):hover { background: #6490ed; }
+		#acceptButton { background: #24845f; }
+		#acceptButton:not(:disabled):hover { background: #2da475; }
+		#declineButton { border-color: #ff7d7d40; color: #ffb2b2; background: #aa3e482b; }
+		#declineButton:not(:disabled):hover { background: #aa3e484d; }
+		#endButton { border-color: #ff7d7d40; color: #ffb2b2; background: #aa3e482b; }
+		#endButton:not(:disabled):hover { background: #aa3e484d; }
+		#muteButton[aria-pressed="true"] { border-color: #ffcb6859; color: #ffdc9a; }
+		.hint { min-height: 1.4em; margin: 20px 0 0; color: #aab6cb; font-size: .88rem; line-height: 1.5; }
+		audio { display: none; }
+		@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; } }
+	</style>
+</head>
+<body>
+	<main>
+		<div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3H5a2 2 0 0 0-2 2c0 8.84 7.16 16 16 16a2 2 0 0 0 2-2v-2l-5-2-2 3a14 14 0 0 1-7-7l3-2-2-5Z"/></svg></div>
+		<h1>Voice calling</h1>
+		<p class="subtitle">Connect with someone, wherever they are.</p>
+		<div id="status" class="status" data-state="disconnected" role="status" aria-live="polite"><span class="dot" aria-hidden="true"></span><span id="statusText">Disconnected</span></div>
+		<div class="controls">
+			<button id="startButton" type="button" disabled>Start Call</button>
+			<button id="acceptButton" type="button" hidden>Accept Call</button>
+			<button id="declineButton" type="button" hidden>Decline Call</button>
+			<button id="endButton" type="button" hidden disabled>End Call</button>
+			<button id="muteButton" type="button" aria-pressed="false" hidden disabled>Mute</button>
+		</div>
+		<p id="hint" class="hint" aria-live="polite">Connecting to the signaling server…</p>
+		<audio id="localAudio" autoplay muted playsinline></audio>
+		<audio id="remoteAudio" autoplay playsinline></audio>
+	</main>
+	<script>
+		(() => {
+			'use strict';
+			const SIGNALING_URL = 'wss://localhost:8080';
+			const statusBadge = document.getElementById('status');
+			const statusText = document.getElementById('statusText');
+			const hint = document.getElementById('hint');
+			const startButton = document.getElementById('startButton');
+			const acceptButton = document.getElementById('acceptButton');
+			const declineButton = document.getElementById('declineButton');
+			const endButton = document.getElementById('endButton');
+			const muteButton = document.getElementById('muteButton');
+			const localAudio = document.getElementById('localAudio');
+			const remoteAudio = document.getElementById('remoteAudio');
+			const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+			let socket, peerConnection, localStream;
+			let pendingCandidates = [];
+			let callActive = false;
+			let pendingOffer = null;
+			let incomingCall = false;
+			let acceptingCall = false;
+			let manuallyClosed = false;
+
+			function log(event, detail) { detail === undefined ? console.log(`[signaling] ${event}`) : console.log(`[signaling] ${event}`, detail); }
+			function setStatus(label, state) { statusText.textContent = label; statusBadge.dataset.state = state; }
+			function updateUI() {
+				const open = socket && socket.readyState === WebSocket.OPEN;
+				if (incomingCall) setStatus('Incoming Call...', 'incoming');
+				else if (callActive) setStatus('Call Active', 'active');
+				else if (open) setStatus('Connected to Server', 'connected');
+				else setStatus('Disconnected', 'disconnected');
+				startButton.hidden = !!incomingCall || !!callActive;
+				acceptButton.hidden = !incomingCall;
+				declineButton.hidden = !incomingCall;
+				endButton.hidden = !callActive;
+				muteButton.hidden = !callActive;
+				startButton.disabled = !!incomingCall || !!callActive || !open;
+				acceptButton.disabled = !open || acceptingCall;
+				declineButton.disabled = acceptingCall;
+				endButton.disabled = !callActive;
+				muteButton.disabled = !callActive || !localStream;
+			}
+			function sendSignal(message) {
+				if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('The signaling server is not connected.');
+				socket.send(JSON.stringify(message));
+			}
+			function connectSignaling() {
+				if (socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN)) return;
+				manuallyClosed = false;
+				hint.textContent = 'Connecting to the signaling server…';
+				try {
+					socket = new WebSocket(SIGNALING_URL);
+					socket.addEventListener('open', () => { log('open'); hint.textContent = 'Ready to start a call.'; updateUI(); });
+					socket.addEventListener('message', event => {
+						log('message', event.data);
+						handleSignal(event.data).catch(error => reportError('Could not process signaling message', error));
+					});
+					socket.addEventListener('error', event => {
+						log('error', event);
+						hint.textContent = 'Could not connect to the signaling server. Check that it is running and trusted.';
+						if (!callActive) setStatus('Disconnected', 'error');
+					});
+					socket.addEventListener('close', event => {
+						log('close', { code: event.code, reason: event.reason, wasClean: event.wasClean });
+						if (callActive || incomingCall) endCall(false);
+						updateUI();
+						if (!manuallyClosed) { hint.textContent = 'Signaling connection closed. Reconnecting…'; window.setTimeout(connectSignaling, 2000); }
+					});
+				} catch (error) {
+					log('error', error); setStatus('Disconnected', 'error'); hint.textContent = 'Unable to open the signaling connection.';
+					window.setTimeout(connectSignaling, 3000);
+				}
+			}
+			function createPeerConnection() {
+				if (peerConnection) return peerConnection;
+				const pc = new RTCPeerConnection(rtcConfig);
+				peerConnection = pc;
+				pc.onicecandidate = event => {
+					if (event.candidate && socket && socket.readyState === WebSocket.OPEN) sendSignal({ type: 'ice-candidate', candidate: event.candidate });
+				};
+				pc.ontrack = event => {
+					if (event.streams[0]) remoteAudio.srcObject = event.streams[0];
+					else {
+						const stream = remoteAudio.srcObject || new MediaStream();
+						stream.addTrack(event.track); remoteAudio.srcObject = stream;
+					}
+					remoteAudio.play().catch(error => log('remote audio playback requires user interaction', error));
+				};
+				pc.onconnectionstatechange = () => {
+					log('peer connection state', pc.connectionState);
+					if (callActive && ['failed', 'closed', 'disconnected'].includes(pc.connectionState)) {
+						hint.textContent = pc.connectionState === 'disconnected' ? 'Peer connection interrupted.' : 'Call connection ended.';
+						endCall(false);
+					}
+				};
+				pc.oniceconnectionstatechange = () => log('ICE connection state', pc.iceConnectionState);
+				return pc;
+			}
+			async function flushPendingCandidates(pc) {
+				const candidates = pendingCandidates; pendingCandidates = [];
+				for (const candidate of candidates) await pc.addIceCandidate(candidate);
+			}
+			async function handleSignal(raw) {
+				let message;
+				try { message = JSON.parse(raw); } catch (error) { log('invalid JSON message', error); return; }
+				if (!message || typeof message.type !== 'string') return;
+				if (message.type === 'offer') {
+					if (callActive || incomingCall) return;
+					const offer = message.offer || message.description || message;
+					pendingOffer = offer;
+					incomingCall = true;
+					hint.textContent = 'Incoming Call... Choose Accept Call or Decline Call.';
+					updateUI();
+				} else if (message.type === 'answer') {
+					if (!peerConnection) return;
+					await peerConnection.setRemoteDescription(message.answer || message.description || message);
+					await flushPendingCandidates(peerConnection); hint.textContent = 'Call connected.';
+				} else if (message.type === 'ice-candidate') {
+					const candidate = message.candidate || message.iceCandidate;
+					if (!candidate) return;
+					if (peerConnection && peerConnection.remoteDescription) await peerConnection.addIceCandidate(candidate);
+					else pendingCandidates.push(candidate);
+				} else if (message.type === 'hangup' || message.type === 'end-call') {
+					endCall(false); hint.textContent = 'The other caller ended the call.';
+				} else if (message.type === 'reject') {
+					endCall(false); hint.textContent = 'Call Declined';
+				}
+			}
+			async function acquireMicrophone() {
+				if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('Microphone access is unavailable. Use a supported browser over HTTPS.');
+				localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+				localAudio.srcObject = localStream;
+				localAudio.play().catch(error => log('local audio preview playback', error));
+				return localStream;
+			}
+			async function acceptCall() {
+				if (!pendingOffer || !incomingCall || acceptingCall) return;
+				const offer = pendingOffer;
+				acceptingCall = true; updateUI();
+				hint.textContent = 'Requesting microphone access…';
+				try {
+					await acquireMicrophone();
+					const pc = createPeerConnection();
+					for (const track of localStream.getTracks()) pc.addTrack(track, localStream);
+					await pc.setRemoteDescription(offer);
+					await flushPendingCandidates(pc);
+					const answer = await pc.createAnswer(); await pc.setLocalDescription(answer);
+					sendSignal({ type: 'answer', answer: pc.localDescription });
+					pendingOffer = null; incomingCall = false; acceptingCall = false; callActive = true;
+					hint.textContent = 'Incoming call connected.'; updateUI();
+				} catch (error) {
+					reportError('Unable to accept call', error);
+					endCall(false);
+				}
+			}
+			function declineCall() {
+				if (!incomingCall) return;
+				if (socket && socket.readyState === WebSocket.OPEN) {
+					try { sendSignal({ type: 'reject' }); } catch (error) { log('could not notify caller', error); }
+				}
+				pendingOffer = null; incomingCall = false; acceptingCall = false; pendingCandidates = [];
+				hint.textContent = 'Call declined.'; updateUI();
+			}
+			async function startCall() {
+				if (!socket || socket.readyState !== WebSocket.OPEN) { hint.textContent = 'Waiting for the signaling server connection.'; connectSignaling(); return; }
+				startButton.disabled = true; hint.textContent = 'Requesting microphone access…';
+				try {
+					await acquireMicrophone();
+					const pc = createPeerConnection();
+					for (const track of localStream.getTracks()) pc.addTrack(track, localStream);
+					const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
+					sendSignal({ type: 'offer', offer: pc.localDescription });
+					callActive = true; hint.textContent = 'Calling… waiting for the other peer.'; updateUI();
+				} catch (error) { reportError('Unable to start call', error); endCall(false); updateUI(); }
+			}
+			function endCall(notifyRemote = true) {
+				const wasActive = callActive || !!peerConnection || !!localStream;
+				callActive = false; incomingCall = false; acceptingCall = false; pendingOffer = null;
+				if (notifyRemote && wasActive && socket && socket.readyState === WebSocket.OPEN) {
+					try { sendSignal({ type: 'hangup' }); } catch (error) { log('could not notify peer', error); }
+				}
+				if (peerConnection) {
+					peerConnection.ontrack = null; peerConnection.onicecandidate = null; peerConnection.onconnectionstatechange = null;
+					peerConnection.close(); peerConnection = null;
+				}
+				if (localStream) { localStream.getTracks().forEach(track => track.stop()); localStream = null; }
+				localAudio.srcObject = null; remoteAudio.srcObject = null; pendingCandidates = [];
+				muteButton.setAttribute('aria-pressed', 'false'); muteButton.textContent = 'Mute'; updateUI();
+			}
+			function toggleMute() {
+				if (!localStream) return;
+				const track = localStream.getAudioTracks()[0]; if (!track) return;
+				track.enabled = !track.enabled;
+				muteButton.setAttribute('aria-pressed', String(!track.enabled));
+				muteButton.textContent = track.enabled ? 'Mute' : 'Unmute';
+				hint.textContent = track.enabled ? 'Microphone is on.' : 'Microphone is muted.';
+			}
+			function reportError(message, error) {
+				console.error(message, error);
+				const detail = error && error.name === 'NotAllowedError' ? 'Allow microphone access in your browser and try again.' : (error && error.message) || 'Please check your connection and try again.';
+				hint.textContent = `${message}: ${detail}`;
+			}
+			startButton.addEventListener('click', startCall);
+			acceptButton.addEventListener('click', acceptCall);
+			declineButton.addEventListener('click', declineCall);
+			endButton.addEventListener('click', () => endCall(true));
+			muteButton.addEventListener('click', toggleMute);
+			window.addEventListener('beforeunload', () => {
+				manuallyClosed = true; endCall(true);
+				if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
+			});
+			connectSignaling(); updateUI();
+		})();
+	</script>
+</body>
+</html>

@@ -9,7 +9,10 @@ const serverOptions = {
 };
 
 const PORT = 8080;
-const server = https.createServer(serverOptions);
+const server = https.createServer(serverOptions, (req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('WebSocket Signaling Server is running.');
+});
 const wss = new WebSocket.Server({ server });
 
 wss.on('connection', (ws) => {
