@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  signaling-server:
+    build:
+      context: ../server
+      dockerfile: Dockerfile
+    container_name: webrtc_signaling_server
+    ports:
+      - "8080:8080"
+    environment:
+      - NODE_ENV=production
