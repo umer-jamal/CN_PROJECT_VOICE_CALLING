@@ -34,8 +34,13 @@
 		#endButton { border-color: #ff7d7d40; color: #ffb2b2; background: #aa3e482b; }
 		#endButton:not(:disabled):hover { background: #aa3e484d; }
 		#muteButton[aria-pressed="true"] { border-color: #ffcb6859; color: #ffdc9a; }
+		.video-stage { display: none; width: 100%; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin: 0 0 20px; }
+		body.video-enabled.in-call .video-stage { display: grid; }
+		.video-stage video { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border: 1px solid #ffffff20; border-radius: 14px; background: #080d16; }
+		#localVideo { transform: scaleX(-1); }
 		.hint { min-height: 1.4em; margin: 20px 0 0; color: #aab6cb; font-size: .88rem; line-height: 1.5; }
 		audio { display: none; }
+		@media (max-width: 520px) { body { padding: 14px; } main { padding: 24px 18px; } .video-stage { grid-template-columns: minmax(0, 1fr); gap: 8px; } }
 		@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; } }
 	</style>
 </head>
@@ -44,13 +49,19 @@
 		<div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3H5a2 2 0 0 0-2 2c0 8.84 7.16 16 16 16a2 2 0 0 0 2-2v-2l-5-2-2 3a14 14 0 0 1-7-7l3-2-2-5Z"/></svg></div>
 		<h1>Voice calling</h1>
 		<p class="subtitle">Connect with someone, wherever they are.</p>
-		<div id="status" class="status" data-state="disconnected" role="status" aria-live="polite"><span class="dot" aria-hidden="true"></span><span id="statusText">Disconnected</span></div>
+		<div id="status" class="status" data-state="disconnected" role="status" aria-live="polite"><span class="dot" aria-hidden="true"></span><span id="status-text">Disconnected</span></div>
+		<div class="video-stage" aria-label="Call video">
+			<video id="localVideo" autoplay playsinline muted></video>
+			<video id="remoteVideo" autoplay playsinline></video>
+		</div>
 		<div class="controls">
 			<button id="startButton" type="button" disabled>Start Call</button>
+			<button id="start-video-btn" type="button" disabled>Start Video Call</button>
 			<button id="acceptButton" type="button" hidden>Accept Call</button>
 			<button id="declineButton" type="button" hidden>Decline Call</button>
 			<button id="endButton" type="button" hidden disabled>End Call</button>
 			<button id="muteButton" type="button" aria-pressed="false" hidden disabled>Mute</button>
+			<button id="toggle-cam-btn" type="button" aria-pressed="true" hidden disabled>Turn Camera Off</button>
 		</div>
 		<p id="hint" class="hint" aria-live="polite">Connecting to the signaling server…</p>
 		<audio id="localAudio" autoplay muted playsinline></audio>
@@ -59,16 +70,24 @@
 	<script>
 		(() => {
 			'use strict';
+			const roomId = new URLSearchParams(window.location.search).get('room') || 'default-room';
+			const deviceName = getDeviceName();
 			const statusBadge = document.getElementById('status');
-			const statusText = document.getElementById('statusText');
+			const statusText = document.getElementById('status-text');
+			const incomingCallModal = document.getElementById('incoming-call-modal');
 			const hint = document.getElementById('hint');
 			const startButton = document.getElementById('startButton');
 			const acceptButton = document.getElementById('acceptButton');
 			const declineButton = document.getElementById('declineButton');
 			const endButton = document.getElementById('endButton');
 			const muteButton = document.getElementById('muteButton');
+			const startVideoButton = document.getElementById('start-video-btn');
+			const toggleCameraButton = document.getElementById('toggle-cam-btn');
 			const localAudio = document.getElementById('localAudio');
 			const remoteAudio = document.getElementById('remoteAudio');
+			const localVideo = document.getElementById('localVideo');
+			const remoteVideo = document.getElementById('remoteVideo');
+			remoteVideo.muted = true;
 			const peerConfiguration = {
 				iceServers: [
 					{ urls: 'stun:stun.l.google.com:19302' },
@@ -80,31 +99,55 @@
 				]
 			};
 			let socket, peerConnection, localStream;
-			let pendingCandidates = [];
+			let iceCandidateQueue = [];
 			let callActive = false;
 			let pendingOffer = null;
+			let remoteDeviceName = 'Unknown Device';
+			let pendingVideoCall = false;
+			let videoCallActive = false;
+			let remoteMediaStream = null;
 			let incomingCall = false;
 			let acceptingCall = false;
+			let roomFull = false;
 			let manuallyClosed = false;
 
+			function getDeviceName() {
+				const platform = navigator.userAgentData?.platform || navigator.userAgent || '';
+				const userAgent = navigator.userAgent || '';
+				const device = `${platform} ${userAgent}`.toLowerCase();
+				if (/android/.test(device)) return 'Android Device';
+				if (/iphone|ipad|ipod/.test(device)) return 'iOS Device';
+				if (/windows/.test(device)) return 'Windows PC';
+				if (/macintosh|mac os|macintel/.test(device)) return 'Mac';
+				if (/linux/.test(device)) return 'Linux PC';
+				return 'Unknown Device';
+			}
 			function log(event, detail) { detail === undefined ? console.log(`[signaling] ${event}`) : console.log(`[signaling] ${event}`, detail); }
 			function setStatus(label, state) { statusText.textContent = label; statusBadge.dataset.state = state; }
 			function updateUI() {
 				const open = socket && socket.readyState === WebSocket.OPEN;
-				if (incomingCall) setStatus('Incoming Call...', 'incoming');
-				else if (callActive) setStatus('Call Active', 'active');
+				if (roomFull) setStatus('Room Full', 'error');
+				else if (incomingCall) setStatus('Incoming Call...', 'incoming');
+				else if (callActive) {
+					const connected = peerConnection && peerConnection.connectionState === 'connected';
+					setStatus(connected ? `Call Connected with ${remoteDeviceName}` : 'Call Active', 'active');
+				}
 				else if (open) setStatus('Connected to Server', 'connected');
 				else setStatus('Disconnected', 'disconnected');
 				startButton.hidden = !!incomingCall || !!callActive;
+				startVideoButton.hidden = !!incomingCall || !!callActive;
 				acceptButton.hidden = !incomingCall;
 				declineButton.hidden = !incomingCall;
 				endButton.hidden = !callActive;
 				muteButton.hidden = !callActive;
-				startButton.disabled = !!incomingCall || !!callActive || !open;
+				toggleCameraButton.hidden = !callActive || !videoCallActive;
+				startButton.disabled = roomFull || !!incomingCall || !!callActive || !open;
+				startVideoButton.disabled = roomFull || !!incomingCall || !!callActive || !open;
 				acceptButton.disabled = !open || acceptingCall;
 				declineButton.disabled = acceptingCall;
 				endButton.disabled = !callActive;
 				muteButton.disabled = !callActive || !localStream;
+				toggleCameraButton.disabled = !localStream || !localStream.getVideoTracks().length;
 			}
 			function sendSignal(message) {
 				if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('The signaling server is not connected.');
@@ -118,7 +161,12 @@
 					const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 					const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
 					socket = ws;
-					ws.onopen = () => { log('open'); hint.textContent = 'Ready to start a call.'; updateUI(); };
+					ws.onopen = () => {
+						log('open');
+						sendSignal({ type: 'join', roomId, deviceName });
+						hint.textContent = 'Ready to start a call.';
+						updateUI();
+					};
 					ws.onmessage = event => {
 						log('message', event.data);
 						handleSignal(event.data).catch(error => reportError('Could not process signaling message', error));
@@ -140,82 +188,143 @@
 				}
 			}
 			function createPeerConnection() {
-				if (peerConnection) return peerConnection;
+				if (peerConnection) {
+					peerConnection.ontrack = null;
+					peerConnection.onicecandidate = null;
+					peerConnection.onconnectionstatechange = null;
+					peerConnection.close();
+				}
+				remoteAudio.srcObject = null;
+				remoteVideo.srcObject = null;
+				remoteMediaStream = null;
 				const pc = new RTCPeerConnection(peerConfiguration);
 				peerConnection = pc;
 				pc.onicecandidate = event => {
 					if (event.candidate && socket && socket.readyState === WebSocket.OPEN) sendSignal({ type: 'ice-candidate', candidate: event.candidate });
 				};
 				pc.ontrack = event => {
-					if (event.streams[0]) remoteAudio.srcObject = event.streams[0];
+					if (event.streams[0]) remoteMediaStream = event.streams[0];
 					else {
-						const stream = remoteAudio.srcObject || new MediaStream();
-						stream.addTrack(event.track); remoteAudio.srcObject = stream;
+						if (!remoteMediaStream) remoteMediaStream = new MediaStream();
+						if (!remoteMediaStream.getTracks().some(track => track.id === event.track.id)) remoteMediaStream.addTrack(event.track);
 					}
+					remoteVideo.srcObject = remoteMediaStream;
+					remoteAudio.srcObject = new MediaStream(remoteMediaStream.getAudioTracks());
+					videoCallActive = videoCallActive || remoteMediaStream.getVideoTracks().length > 0;
+					if (videoCallActive && pc.connectionState === 'connected') document.body.classList.add('video-enabled');
+					updateUI();
+					remoteVideo.play().catch(error => log('remote video playback requires user interaction', error));
 					remoteAudio.play().catch(error => log('remote audio playback requires user interaction', error));
 				};
 				pc.onconnectionstatechange = () => {
 					log('peer connection state', pc.connectionState);
-					if (callActive && ['failed', 'closed', 'disconnected'].includes(pc.connectionState)) {
-						hint.textContent = pc.connectionState === 'disconnected' ? 'Peer connection interrupted.' : 'Call connection ended.';
+					if (pc.connectionState === 'connected') {
+						callActive = true;
+						incomingCall = false;
+						pendingOffer = null;
+						if (incomingCallModal) incomingCallModal.hidden = true;
+						document.body.classList.add('in-call');
+						if (videoCallActive) document.body.classList.add('video-enabled');
+						updateUI();
+						setStatus(`Call Connected with ${remoteDeviceName}`, 'active');
+					} else if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) {
 						endCall(false);
+						setStatus('Call Ended', 'disconnected');
 					}
 				};
 				pc.oniceconnectionstatechange = () => log('ICE connection state', pc.iceConnectionState);
 				return pc;
 			}
-			async function flushPendingCandidates(pc) {
-				const candidates = pendingCandidates; pendingCandidates = [];
+			async function flushIceCandidateQueue(pc) {
+				const candidates = iceCandidateQueue.splice(0);
 				for (const candidate of candidates) await pc.addIceCandidate(candidate);
+			}
+			async function addIceCandidate(candidate) {
+				if (peerConnection && peerConnection.remoteDescription) {
+					await peerConnection.addIceCandidate(candidate);
+				} else {
+					iceCandidateQueue.push(candidate);
+				}
+			}
+			async function handleOffer(message) {
+				if (callActive || incomingCall) return;
+				const offer = message.offer || message.description || message;
+				remoteDeviceName = typeof message.deviceName === 'string' && message.deviceName.trim()
+					? message.deviceName
+					: 'Unknown Device';
+				pendingVideoCall = message.videoCall === true;
+				videoCallActive = pendingVideoCall;
+				pendingOffer = offer;
+				incomingCall = true;
+				if (incomingCallModal) incomingCallModal.hidden = false;
+				const pc = createPeerConnection();
+				try {
+					await pc.setRemoteDescription(offer);
+					await flushIceCandidateQueue(pc);
+				} catch (error) {
+					endCall(false);
+					throw error;
+				}
+				hint.textContent = `Incoming call from ${remoteDeviceName} in room ${roomId}. Choose Accept Call or Decline Call.`;
+				updateUI();
+			}
+			async function handleAnswer(message) {
+				if (!peerConnection) return;
+				if (typeof message.deviceName === 'string' && message.deviceName.trim()) {
+					remoteDeviceName = message.deviceName;
+				}
+				await peerConnection.setRemoteDescription(message.answer || message.description || message);
+				await flushIceCandidateQueue(peerConnection);
+				hint.textContent = 'Call connected.';
 			}
 			async function handleSignal(raw) {
 				let message;
 				try { message = JSON.parse(raw); } catch (error) { log('invalid JSON message', error); return; }
 				if (!message || typeof message.type !== 'string') return;
-				if (message.type === 'offer') {
-					if (callActive || incomingCall) return;
-					const offer = message.offer || message.description || message;
-					pendingOffer = offer;
-					incomingCall = true;
-					hint.textContent = 'Incoming Call... Choose Accept Call or Decline Call.';
+				if (message.type === 'room-full') {
+					roomFull = true;
+					hint.textContent = 'This room is full. One-to-one calls allow two participants; please use another room.';
 					updateUI();
+				} else if (message.type === 'offer') {
+					await handleOffer(message);
 				} else if (message.type === 'answer') {
-					if (!peerConnection) return;
-					await peerConnection.setRemoteDescription(message.answer || message.description || message);
-					await flushPendingCandidates(peerConnection); hint.textContent = 'Call connected.';
-				} else if (message.type === 'ice-candidate') {
+					await handleAnswer(message);
+				} else if (message.type === 'ice-candidate' || message.type === 'candidate') {
 					const candidate = message.candidate || message.iceCandidate;
 					if (!candidate) return;
-					if (peerConnection && peerConnection.remoteDescription) await peerConnection.addIceCandidate(candidate);
-					else pendingCandidates.push(candidate);
+					await addIceCandidate(candidate);
 				} else if (message.type === 'hangup' || message.type === 'end-call') {
 					endCall(false); hint.textContent = 'The other caller ended the call.';
 				} else if (message.type === 'reject') {
 					endCall(false); hint.textContent = 'Call Declined';
 				}
 			}
-			async function acquireMicrophone() {
+			async function getMediaStream(enableVideo) {
 				if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('Microphone access is unavailable. Use a supported browser over HTTPS.');
-				localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+				return navigator.mediaDevices.getUserMedia({ audio: true, video: enableVideo });
+			}
+			async function initMedia(enableVideo) {
+				localStream = await getMediaStream(enableVideo);
 				localAudio.srcObject = localStream;
+				localVideo.srcObject = localStream;
 				localAudio.play().catch(error => log('local audio preview playback', error));
+				if (enableVideo) localVideo.play().catch(error => log('local video playback requires user interaction', error));
 				return localStream;
 			}
 			async function acceptCall() {
 				if (!pendingOffer || !incomingCall || acceptingCall) return;
-				const offer = pendingOffer;
 				acceptingCall = true; updateUI();
 				hint.textContent = 'Requesting microphone access…';
 				try {
-					await acquireMicrophone();
-					const pc = createPeerConnection();
+					videoCallActive = pendingVideoCall;
+					await initMedia(videoCallActive);
+					const pc = peerConnection;
+					if (!pc) throw new Error('The incoming peer connection is no longer available.');
 					for (const track of localStream.getTracks()) pc.addTrack(track, localStream);
-					await pc.setRemoteDescription(offer);
-					await flushPendingCandidates(pc);
 					const answer = await pc.createAnswer(); await pc.setLocalDescription(answer);
-					sendSignal({ type: 'answer', answer: pc.localDescription });
+					sendSignal({ type: 'answer', answer: pc.localDescription, deviceName, videoCall: videoCallActive });
 					pendingOffer = null; incomingCall = false; acceptingCall = false; callActive = true;
-					hint.textContent = 'Incoming call connected.'; updateUI();
+					hint.textContent = 'Connecting call…'; updateUI();
 				} catch (error) {
 					reportError('Unable to accept call', error);
 					endCall(false);
@@ -226,18 +335,24 @@
 				if (socket && socket.readyState === WebSocket.OPEN) {
 					try { sendSignal({ type: 'reject' }); } catch (error) { log('could not notify caller', error); }
 				}
-				pendingOffer = null; incomingCall = false; acceptingCall = false; pendingCandidates = [];
+				endCall(false);
 				hint.textContent = 'Call declined.'; updateUI();
 			}
-			async function startCall() {
+			async function startCall(enableVideo = false) {
+				if (roomFull) {
+					hint.textContent = 'This room is full. Please use another room.';
+					return;
+				}
 				if (!socket || socket.readyState !== WebSocket.OPEN) { hint.textContent = 'Waiting for the signaling server connection.'; connectSignaling(); return; }
 				startButton.disabled = true; hint.textContent = 'Requesting microphone access…';
 				try {
-					await acquireMicrophone();
+					videoCallActive = enableVideo;
+					await initMedia(enableVideo);
+					iceCandidateQueue = [];
 					const pc = createPeerConnection();
 					for (const track of localStream.getTracks()) pc.addTrack(track, localStream);
 					const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
-					sendSignal({ type: 'offer', offer: pc.localDescription });
+					sendSignal({ type: 'offer', offer: pc.localDescription, deviceName, videoCall: enableVideo });
 					callActive = true; hint.textContent = 'Calling… waiting for the other peer.'; updateUI();
 				} catch (error) { reportError('Unable to start call', error); endCall(false); updateUI(); }
 			}
@@ -252,8 +367,15 @@
 					peerConnection.close(); peerConnection = null;
 				}
 				if (localStream) { localStream.getTracks().forEach(track => track.stop()); localStream = null; }
-				localAudio.srcObject = null; remoteAudio.srcObject = null; pendingCandidates = [];
+				localAudio.srcObject = null; remoteAudio.srcObject = null; iceCandidateQueue = [];
+				localVideo.srcObject = null; remoteVideo.srcObject = null; remoteMediaStream = null;
+				remoteDeviceName = 'Unknown Device';
+				pendingVideoCall = false; videoCallActive = false;
+				document.body.classList.remove('in-call');
+				document.body.classList.remove('video-enabled');
+				if (incomingCallModal) incomingCallModal.hidden = true;
 				muteButton.setAttribute('aria-pressed', 'false'); muteButton.textContent = 'Mute'; updateUI();
+				toggleCameraButton.setAttribute('aria-pressed', 'true'); toggleCameraButton.textContent = 'Turn Camera Off';
 			}
 			function toggleMute() {
 				if (!localStream) return;
@@ -263,16 +385,28 @@
 				muteButton.textContent = track.enabled ? 'Mute' : 'Unmute';
 				hint.textContent = track.enabled ? 'Microphone is on.' : 'Microphone is muted.';
 			}
+			function toggleCamera() {
+				if (!localStream) return;
+				const tracks = localStream.getVideoTracks();
+				if (!tracks.length) return;
+				const enabled = !tracks[0].enabled;
+				tracks.forEach(track => { track.enabled = enabled; });
+				toggleCameraButton.setAttribute('aria-pressed', String(enabled));
+				toggleCameraButton.textContent = enabled ? 'Turn Camera Off' : 'Turn Camera On';
+				hint.textContent = enabled ? 'Camera is on.' : 'Camera is off.';
+			}
 			function reportError(message, error) {
 				console.error(message, error);
 				const detail = error && error.name === 'NotAllowedError' ? 'Allow microphone access in your browser and try again.' : (error && error.message) || 'Please check your connection and try again.';
 				hint.textContent = `${message}: ${detail}`;
 			}
-			startButton.addEventListener('click', startCall);
+			startButton.addEventListener('click', () => startCall(false));
+			startVideoButton.addEventListener('click', () => startCall(true));
 			acceptButton.addEventListener('click', acceptCall);
 			declineButton.addEventListener('click', declineCall);
 			endButton.addEventListener('click', () => endCall(true));
 			muteButton.addEventListener('click', toggleMute);
+			toggleCameraButton.addEventListener('click', toggleCamera);
 			window.addEventListener('beforeunload', () => {
 				manuallyClosed = true; endCall(true);
 				if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
