@@ -59,7 +59,6 @@
 	<script>
 		(() => {
 			'use strict';
-			const SIGNALING_URL = 'wss://localhost:8080';
 			const statusBadge = document.getElementById('status');
 			const statusText = document.getElementById('statusText');
 			const hint = document.getElementById('hint');
@@ -70,7 +69,16 @@
 			const muteButton = document.getElementById('muteButton');
 			const localAudio = document.getElementById('localAudio');
 			const remoteAudio = document.getElementById('remoteAudio');
-			const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+			const peerConfiguration = {
+				iceServers: [
+					{ urls: 'stun:stun.l.google.com:19302' },
+					{
+						urls: 'turn:localhost:3478',
+						username: 'webrtcuser',
+						credential: 'webrtcpass'
+					}
+				]
+			};
 			let socket, peerConnection, localStream;
 			let pendingCandidates = [];
 			let callActive = false;
@@ -107,23 +115,25 @@
 				manuallyClosed = false;
 				hint.textContent = 'Connecting to the signaling server…';
 				try {
-					socket = new WebSocket(SIGNALING_URL);
-					socket.addEventListener('open', () => { log('open'); hint.textContent = 'Ready to start a call.'; updateUI(); });
-					socket.addEventListener('message', event => {
+					const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+					const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+					socket = ws;
+					ws.onopen = () => { log('open'); hint.textContent = 'Ready to start a call.'; updateUI(); };
+					ws.onmessage = event => {
 						log('message', event.data);
 						handleSignal(event.data).catch(error => reportError('Could not process signaling message', error));
-					});
-					socket.addEventListener('error', event => {
+					};
+					ws.onerror = event => {
 						log('error', event);
 						hint.textContent = 'Could not connect to the signaling server. Check that it is running and trusted.';
 						if (!callActive) setStatus('Disconnected', 'error');
-					});
-					socket.addEventListener('close', event => {
+					};
+					ws.onclose = event => {
 						log('close', { code: event.code, reason: event.reason, wasClean: event.wasClean });
 						if (callActive || incomingCall) endCall(false);
 						updateUI();
 						if (!manuallyClosed) { hint.textContent = 'Signaling connection closed. Reconnecting…'; window.setTimeout(connectSignaling, 2000); }
-					});
+					};
 				} catch (error) {
 					log('error', error); setStatus('Disconnected', 'error'); hint.textContent = 'Unable to open the signaling connection.';
 					window.setTimeout(connectSignaling, 3000);
@@ -131,7 +141,7 @@
 			}
 			function createPeerConnection() {
 				if (peerConnection) return peerConnection;
-				const pc = new RTCPeerConnection(rtcConfig);
+				const pc = new RTCPeerConnection(peerConfiguration);
 				peerConnection = pc;
 				pc.onicecandidate = event => {
 					if (event.candidate && socket && socket.readyState === WebSocket.OPEN) sendSignal({ type: 'ice-candidate', candidate: event.candidate });

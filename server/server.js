@@ -1,15 +1,16 @@
 const fs = require('fs');
+const path = require('path');
 const https = require('https');
 const WebSocket = require('ws');
 
 // Load local SSL certificates created by mkcert
-const serverOptions = {
-  key: fs.readFileSync('./localhost+1-key.pem'),
-  cert: fs.readFileSync('./localhost+1.pem')
+const httpsOptions = {
+  key: fs.readFileSync(path.join(__dirname, 'certs', 'key.pem')),
+  cert: fs.readFileSync(path.join(__dirname, 'certs', 'cert.pem'))
 };
 
 const PORT = 8080;
-const server = https.createServer(serverOptions, (req, res) => {
+const server = https.createServer(httpsOptions, (req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('WebSocket Signaling Server is running.');
 });
