@@ -9,3 +9,7 @@ package-lock.json
 # Ignore system files
 .DS_Store
 Thumbs.db
+
+# Local test relay credentials and tunnel logs
+client/runtime-config.js
+.tunnel/

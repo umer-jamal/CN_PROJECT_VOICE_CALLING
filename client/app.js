@@ -102,16 +102,17 @@ document.getElementById('chat-form').addEventListener('submit', (event) => {
 // A separately reachable TURN service can override these defaults at runtime.
 const configuredTurnServers = Array.isArray(window.WEBRTC_TURN_SERVERS)
   ? window.WEBRTC_TURN_SERVERS
-  : [{
+  : (/^(localhost|127\.0\.0\.1|192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(window.location.hostname) ? [{
       urls: [
         `turn:${window.location.hostname}:3478?transport=udp`,
         `turn:${window.location.hostname}:3478?transport=tcp`
       ],
       username: 'webrtcuser',
       credential: 'webrtcpass'
-    }];
+    }] : []);
 
 const rtcConfig = {
+  iceTransportPolicy: window.WEBRTC_FORCE_RELAY === true ? 'relay' : 'all',
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
