@@ -207,3 +207,58 @@ button.danger:hover, #end-btn:hover {
   margin-top: 22px;
   gap: 12px;
 }
+
+.chat-panel {
+  margin-top: 20px;
+  padding: 16px;
+  text-align: left;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 16px;
+}
+
+#chat-status {
+  margin: 8px 0;
+  color: #8b949e;
+  font-size: 14px;
+}
+
+#chat-messages {
+  height: 180px;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+
+#chat-messages p {
+  margin: 8px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat-compose {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+#chat-input {
+  flex: 1;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  background: #0d1117;
+  color: #f0f6fc;
+  font: inherit;
+}
+
+#chat-input:focus-visible, #chat-send:focus-visible {
+  outline: 2px solid #58a6ff;
+  outline-offset: 2px;
+}
+
+button:disabled, input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}

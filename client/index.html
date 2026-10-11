@@ -39,6 +39,19 @@
       <button id="end-btn" class="danger" onclick="endCall(true)">End Call</button>
     </div>
 
+    <section class="chat-panel" aria-labelledby="chat-heading">
+      <h3 id="chat-heading">Text chat</h3>
+      <p id="chat-status" role="status">Waiting for the other user...</p>
+      <div id="chat-messages" role="log" aria-label="Chat messages" aria-live="polite"></div>
+      <form id="chat-form">
+        <label for="chat-input">Message</label>
+        <div class="chat-compose">
+          <input id="chat-input" type="text" maxlength="2000" placeholder="Type a message..." autocomplete="off" disabled>
+          <button id="chat-send" type="submit" disabled>Send</button>
+        </div>
+      </form>
+    </section>
+
     <!-- Incoming Call Modal -->
     <div id="incoming-modal" class="modal hidden">
       <div class="modal-content">

@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const WebSocket = require('ws');
+const { randomUUID } = require('crypto');
 
 // Load local SSL certificates created by mkcert
 const httpsOptions = {
@@ -19,10 +20,17 @@ const rooms = new Map();
 
 function removeFromRoom(ws) {
   if (!ws.roomId) return;
-  const clients = rooms.get(ws.roomId);
+  const roomId = ws.roomId;
+  const clients = rooms.get(roomId);
   if (!clients) return;
   clients.delete(ws);
-  if (clients.size === 0) rooms.delete(ws.roomId);
+  ws.roomId = null;
+  ws.chatSessionId = null;
+  clients.forEach((client) => {
+    client.chatSessionId = null;
+    if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify({ type: 'peer-left' }));
+  });
+  if (clients.size === 0) rooms.delete(roomId);
 }
 
 wss.on('connection', (ws) => {
@@ -62,6 +70,17 @@ wss.on('connection', (ws) => {
       ws.deviceName = payload.deviceName;
       if (!rooms.has(ws.roomId)) rooms.set(ws.roomId, new Set());
       rooms.get(ws.roomId).add(ws);
+      const members = [...rooms.get(ws.roomId)];
+      if (members.length === 2) {
+        const sessionId = randomUUID();
+        members.forEach((client, index) => {
+          client.chatSessionId = sessionId;
+          client.send(JSON.stringify({
+            type: 'peer-ready', sessionId, initiator: index === 0,
+            deviceName: members[1 - index].deviceName
+          }));
+        });
+      }
       return;
     }
 
@@ -69,7 +88,8 @@ wss.on('connection', (ws) => {
 
     const clients = rooms.get(ws.roomId);
     if (!clients) return;
-    if (!['offer', 'answer', 'candidate', 'ice-candidate', 'hangup', 'reject', 'end-call'].includes(payload.type)) return;
+    if (!['offer', 'answer', 'candidate', 'ice-candidate', 'hangup', 'reject', 'end-call', 'chat-offer', 'chat-answer', 'chat-candidate'].includes(payload.type)) return;
+    if (payload.type.startsWith('chat-') && (!ws.chatSessionId || payload.sessionId !== ws.chatSessionId)) return;
     if (payload.type === 'offer' || payload.type === 'answer') payload.deviceName = ws.deviceName;
 
     const forwardedMessage = JSON.stringify(payload);

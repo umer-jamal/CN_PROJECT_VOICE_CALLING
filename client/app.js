@@ -4,6 +4,100 @@ let iceCandidateQueue = [];
 let pendingOffer = null;
 let currentCallType = 'video';
 let remoteDeviceName = 'Remote Peer';
+let chatChannel = null;
+let chatPeerConnection = null;
+let chatSessionId = null;
+let chatRemoteName = 'Remote Peer';
+let chatSignalQueue = Promise.resolve();
+const MAX_CHAT_LENGTH = 2000;
+const MAX_CHAT_BUFFER = 64 * 1024;
+
+function setChatStatus(message) {
+  document.getElementById('chat-status').textContent = message;
+  const ready = chatChannel?.readyState === 'open';
+  document.getElementById('chat-input').disabled = !ready;
+  document.getElementById('chat-send').disabled = !ready;
+}
+
+function closeChat(message = 'Waiting for the other user...') {
+  chatSessionId = null;
+  if (chatPeerConnection) {
+    chatPeerConnection.ondatachannel = null;
+    chatPeerConnection.onicecandidate = null;
+    chatPeerConnection.onconnectionstatechange = null;
+    chatPeerConnection.close();
+    chatPeerConnection = null;
+  }
+  if (chatChannel) {
+    chatChannel.onopen = null;
+    chatChannel.onmessage = null;
+    chatChannel.onclose = null;
+    chatChannel.onerror = null;
+    chatChannel.close();
+    chatChannel = null;
+  }
+  setChatStatus(message);
+}
+
+function appendChatMessage(sender, message) {
+  const messages = document.getElementById('chat-messages');
+  const item = document.createElement('p');
+  const label = document.createElement('strong');
+  label.textContent = `${sender}: `;
+  const body = document.createElement('span');
+  body.textContent = message;
+  item.append(label, body);
+  messages.append(item);
+  // Bound the in-memory transcript during long conversations.
+  if (messages.children.length > 200) messages.firstElementChild.remove();
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function setupChatChannel(channel, pc) {
+  if (pc !== chatPeerConnection || channel.label !== 'chat' || chatChannel) {
+    channel.close();
+    return;
+  }
+  chatChannel = channel;
+  setChatStatus('Connecting chat...');
+  channel.onopen = () => setChatStatus('Chat connected');
+  channel.onclose = () => setChatStatus('Chat disconnected. Refresh to reconnect.');
+  channel.onerror = () => setChatStatus('Chat error. Try sending again or refresh to reconnect.');
+  channel.onmessage = (event) => {
+    if (typeof event.data !== 'string' || event.data.length > MAX_CHAT_LENGTH || !event.data.trim()) return;
+    appendChatMessage(chatRemoteName, event.data);
+  };
+  if (channel.readyState === 'open') setChatStatus('Chat connected');
+}
+
+document.getElementById('chat-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const input = document.getElementById('chat-input');
+  const message = input.value.trim();
+  if (!message) return;
+  if (!chatChannel || chatChannel.readyState !== 'open') {
+    setChatStatus('Chat is not connected.');
+    return;
+  }
+  if (message.length > MAX_CHAT_LENGTH) {
+    setChatStatus(`Keep messages under ${MAX_CHAT_LENGTH + 1} characters.`);
+    return;
+  }
+  if (chatChannel.bufferedAmount > MAX_CHAT_BUFFER) {
+    setChatStatus('Chat is busy. Wait a moment and try again.');
+    return;
+  }
+  try {
+    chatChannel.send(message);
+    appendChatMessage('You', message);
+    input.value = '';
+    setChatStatus('Chat connected');
+    input.focus();
+  } catch (err) {
+    console.error('Unable to send chat message:', err);
+    setChatStatus('Message was not sent. Try again.');
+  }
+});
 
 // A separately reachable TURN service can override these defaults at runtime.
 const configuredTurnServers = Array.isArray(window.WEBRTC_TURN_SERVERS)
@@ -47,6 +141,14 @@ ws.onmessage = async (event) => {
     const data = JSON.parse(event.data);
     console.log('Received signaling message:', data.type);
 
+    if (['peer-ready', 'peer-left', 'room-full', 'chat-offer', 'chat-answer', 'chat-candidate'].includes(data.type)) {
+      chatSignalQueue = chatSignalQueue.then(() => handleChatSignal(data)).catch((err) => {
+        console.error('Chat signaling failed:', err);
+        closeChat('Chat connection failed. Refresh to reconnect.');
+      });
+      await chatSignalQueue;
+      return;
+    }
     if (data.type === 'offer') await handleOffer(data);
     else if (data.type === 'answer') await handleAnswer(data);
     else if (data.type === 'candidate') await handleCandidate(data);
@@ -55,6 +157,72 @@ ws.onmessage = async (event) => {
     console.error('Error handling WebSocket message:', err);
   }
 };
+
+// Chat signaling is serialized independently from media call signaling.
+function sendChatSignal(type, fields = {}) {
+  if (ws.readyState !== WebSocket.OPEN) throw new Error('Signaling is disconnected.');
+  ws.send(JSON.stringify({ type, sessionId: chatSessionId, ...fields }));
+}
+
+async function handleChatSignal(data) {
+  if (data.type === 'peer-ready') {
+    closeChat();
+    chatSessionId = data.sessionId;
+    chatRemoteName = data.deviceName || 'Remote Peer';
+    const pc = new RTCPeerConnection(rtcConfig);
+    chatPeerConnection = pc;
+    pc.ondatachannel = (event) => setupChatChannel(event.channel, pc);
+    // Send SDP before candidates, including browsers that gather ICE early.
+    const candidates = [];
+    let descriptionSent = false;
+    pc.sendDescription = (type, fields) => {
+      if (pc !== chatPeerConnection) return;
+      sendChatSignal(type, fields);
+      descriptionSent = true;
+      candidates.splice(0).forEach(candidate => sendChatSignal('chat-candidate', { candidate }));
+    };
+    pc.onicecandidate = (event) => {
+      if (pc !== chatPeerConnection || !event.candidate) return;
+      if (!descriptionSent) candidates.push(event.candidate);
+      else if (ws.readyState === WebSocket.OPEN) sendChatSignal('chat-candidate', { candidate: event.candidate });
+    };
+    pc.onconnectionstatechange = () => {
+      if (pc === chatPeerConnection && pc.connectionState === 'failed') {
+        closeChat('Chat connection failed. Refresh to reconnect.');
+      }
+    };
+    setChatStatus('Connecting chat...');
+    if (data.initiator) {
+      setupChatChannel(pc.createDataChannel('chat'), pc);
+      await pc.setLocalDescription(await pc.createOffer());
+      pc.sendDescription('chat-offer', { offer: pc.localDescription });
+    }
+    return;
+  }
+  if (data.type === 'peer-left') {
+    closeChat();
+    handleRemoteHangup();
+    return;
+  }
+  if (data.type === 'room-full') {
+    closeChat('This room already has two users. Choose another room.');
+    return;
+  }
+  const pc = chatPeerConnection;
+  if (!pc || data.sessionId !== chatSessionId) return;
+  if (data.type === 'chat-offer') {
+    await pc.setRemoteDescription(data.offer);
+    await pc.setLocalDescription(await pc.createAnswer());
+    pc.sendDescription('chat-answer', { answer: pc.localDescription });
+  } else if (data.type === 'chat-answer') {
+    await pc.setRemoteDescription(data.answer);
+  } else if (data.type === 'chat-candidate' && data.candidate) {
+    await pc.addIceCandidate(data.candidate);
+  }
+}
+
+ws.onclose = () => closeChat('Disconnected from server. Refresh to reconnect.');
+ws.onerror = () => setChatStatus('Signaling connection error.');
 
 // Request Camera / Microphone Stream
 async function getMedia(callType = currentCallType) {
