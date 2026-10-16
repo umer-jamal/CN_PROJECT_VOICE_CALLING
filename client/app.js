@@ -4,17 +4,18 @@ let iceCandidateQueue = [];
 let pendingOffer = null;
 let currentCallType = 'video';
 let remoteDeviceName = 'Remote Peer';
+let heartbeatInterval = null;
 
-// A separately reachable TURN service can override these defaults at runtime.
+// TURN configuration for cross-network and cloud server routing
 const configuredTurnServers = Array.isArray(window.WEBRTC_TURN_SERVERS)
   ? window.WEBRTC_TURN_SERVERS
   : [{
       urls: [
-        `turn:${window.location.hostname}:3478?transport=udp`,
-        `turn:${window.location.hostname}:3478?transport=tcp`
+        "turn:global.relay.metered.ca:80",
+        "turn:global.relay.metered.ca:443?transport=tcp"
       ],
-      username: 'webrtcuser',
-      credential: 'webrtcpass'
+      username: 'YOUR_METERED_USERNAME',
+      credential: 'YOUR_METERED_PASSWORD'
     }];
 
 const rtcConfig = {
@@ -40,6 +41,18 @@ const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
 ws.onopen = () => {
   document.getElementById('status-text').innerText = 'Connected to Server';
   ws.send(JSON.stringify({ type: 'join', roomId, deviceName }));
+
+  // Prevent Cloudflare 100s idle WebSocket disconnect
+  if (heartbeatInterval) clearInterval(heartbeatInterval);
+  heartbeatInterval = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'ping' }));
+    }
+  }, 30000);
+};
+
+ws.onclose = () => {
+  if (heartbeatInterval) clearInterval(heartbeatInterval);
 };
 
 ws.onmessage = async (event) => {
@@ -131,13 +144,33 @@ function createPeerConnection() {
     }
   };
 
+  let disconnectTimer = null;
+
   pc.onconnectionstatechange = () => {
     const statusText = document.getElementById('status-text');
     console.log('Peer connection state:', pc.connectionState);
 
     if (pc.connectionState === 'connected') {
+      if (disconnectTimer) {
+        clearTimeout(disconnectTimer);
+        disconnectTimer = null;
+      }
       statusText.innerText = `Connected (${currentCallType.toUpperCase()} call with ${remoteDeviceName})`;
-    } else if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
+    } else if (pc.connectionState === 'disconnected') {
+      statusText.innerText = 'Reconnecting call...';
+      console.warn('Temporary media disconnection detected. Waiting for auto-recovery...');
+
+      // Allow 10 seconds for WebRTC to re-establish media flow before tearing down
+      if (!disconnectTimer) {
+        disconnectTimer = setTimeout(() => {
+          if (peerConnection && pc.connectionState === 'disconnected') {
+            console.error('Reconnection timed out.');
+            endCall(false);
+          }
+        }, 10000);
+      }
+    } else if (['failed', 'closed'].includes(pc.connectionState)) {
+      if (disconnectTimer) clearTimeout(disconnectTimer);
       endCall(false);
     }
   };
@@ -180,7 +213,12 @@ async function handleOffer(data, acceptedPeerConnection = null) {
       console.error('Received an offer without a session description.');
       return;
     }
-    if (peerConnection || pendingOffer) return;
+
+    // Clean up stale or existing peer connections before processing a new incoming offer
+    if (peerConnection) {
+      peerConnection.close();
+      peerConnection = null;
+    }
 
     pendingOffer = data;
     currentCallType = data.callType === 'voice' ? 'voice' : 'video';
@@ -264,8 +302,7 @@ async function handleCandidate(data) {
       iceCandidateQueue.push(candidate);
     }
   } catch (err) {
-    console.error('Error handling candidate:', err);
-    endCall(false);
+    console.warn('Non-fatal ICE candidate error:', err);
   }
 }
 
@@ -277,8 +314,7 @@ async function processBufferedCandidates(pc = peerConnection) {
     try {
       await pc.addIceCandidate(candidate);
     } catch (err) {
-      console.error('Error adding buffered ICE candidate:', err);
-      throw err;
+      console.warn('Ignored non-fatal buffered candidate error:', err);
     }
   }
 }

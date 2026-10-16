@@ -38,6 +38,10 @@ wss.on('connection', (ws) => {
     }
 
     if (!payload || typeof payload.type !== 'string') return;
+    if (payload.type === 'ping') {
+      // Ignore ping messages used for Cloudflare keep-alive
+      return;
+    }
 
     if (payload.type === 'join') {
       if (typeof payload.roomId !== 'string' || !payload.roomId.trim() ||
