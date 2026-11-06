@@ -3,27 +3,49 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>WebRTC Calling App</title>
+  <meta name="description" content="A private, beautifully designed peer-to-peer calling experience.">
+  <title>Aura — Private Calling</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <!-- HTML5 Audio element for incoming call ringtone -->
+  <audio id="incoming-ringtone" loop src="ringtone.mp3" preload="auto"></audio>
+
   <div class="container">
     <header>
-      <h2>WebRTC Calling App</h2>
-      <p id="room-id-display">Room: Loading...</p>
-      <p id="status-text">Connecting to signaling server...</p>
+      <span class="eyebrow">PRIVATE • PEER-TO-PEER</span>
+      <h2>Aura.</h2>
+      
+      <div class="header-info">
+        <p id="room-id-display">Room: Loading...</p>
+        
+        <div class="centered-status">
+          <p id="status-text">Connecting to signaling server...</p>
+          <span id="call-timer" class="timer hidden">00:00</span>
+        </div>
+      </div>
     </header>
 
     <!-- Lobby controls (Initial state) -->
     <div id="lobby-controls" class="controls">
-      <button id="start-voice-btn" onclick="startCall('voice')">Start Voice Call</button>
-      <button id="start-video-btn" onclick="startCall('video')">Start Video Call</button>
+      <button id="start-voice-btn" class="standard-btn" onclick="startCall('voice')">
+        <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 016 0v6a3 3 0 01-3 3z"/></svg>
+        <span>Start Voice Call</span>
+      </button>
+      <button id="start-video-btn" class="standard-btn" onclick="startCall('video')">
+        <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+        <span>Start Video Call</span>
+      </button>
     </div>
 
-    <!-- Active Video Grid (WhatsApp Overlay Style) -->
+    <!-- Active Video Grid -->
     <div id="video-container" class="video-grid hidden">
       <div class="remote-video-wrapper">
         <video id="remoteVideo" autoplay playsinline></video>
+        <!-- Dynamic Waiting Overlay -->
+        <div id="waiting-overlay" class="waiting-overlay">
+          <span>Waiting for a connection...</span>
+        </div>
         <span class="video-label">Remote Peer</span>
       </div>
       <div class="local-video-wrapper">
@@ -32,11 +54,17 @@
       </div>
     </div>
 
-    <!-- In-Call / Calling Controls (Always visible when calling or in a call) -->
-    <div id="incall-controls" class="controls hidden">
-      <button id="mute-btn" onclick="toggleMute()">Mute Audio</button>
-      <button id="camera-btn" onclick="toggleCamera()">Toggle Camera</button>
-      <button id="end-btn" class="danger" onclick="endCall(true)">End Call</button>
+    <!-- In-Call / Skype-Style Circular Controls -->
+    <div id="incall-controls" class="controls hidden icon-controls">
+      <button id="mute-btn" class="icon-btn action-btn" onclick="toggleMute()" title="Mute Audio">
+        <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 016 0v6a3 3 0 01-3 3z"/></svg>
+      </button>
+      <button id="camera-btn" class="icon-btn action-btn" onclick="toggleCamera()" title="Toggle Camera">
+        <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+      </button>
+      <button id="end-btn" class="icon-btn danger-btn" onclick="endCall(true)" title="End Call">
+        <svg class="icon" fill="currentColor" viewBox="0 0 24 24"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z" transform="rotate(135 12 12)"/></svg>
+      </button>
     </div>
 
     <!-- Incoming Call Modal -->
@@ -44,9 +72,13 @@
       <div class="modal-content">
         <h3 id="incoming-type-text">Incoming Call</h3>
         <p id="caller-name">Someone is calling...</p>
-        <div class="modal-buttons">
-          <button class="success" onclick="acceptCall()">Accept</button>
-          <button class="danger" onclick="rejectCall()">Reject</button>
+        <div class="modal-buttons icon-controls">
+          <button class="icon-btn success-btn" onclick="acceptCall()" title="Accept Call">
+            <svg class="icon" fill="currentColor" viewBox="0 0 24 24"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>
+          </button>
+          <button class="icon-btn danger-btn" onclick="rejectCall()" title="Reject Call">
+            <svg class="icon" fill="currentColor" viewBox="0 0 24 24"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z" transform="rotate(135 12 12)"/></svg>
+          </button>
         </div>
       </div>
     </div>

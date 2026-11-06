@@ -6,18 +6,168 @@ let currentCallType = 'video';
 let remoteDeviceName = 'Remote Peer';
 let heartbeatInterval = null;
 
-// TURN configuration for cross-network and cloud server routing
-const configuredTurnServers = Array.isArray(window.WEBRTC_TURN_SERVERS)
-  ? window.WEBRTC_TURN_SERVERS
-  : [{
-      urls: [
-        "turn:global.relay.metered.ca:80",
-        "turn:global.relay.metered.ca:443?transport=tcp"
-      ],
-      username: 'YOUR_METERED_USERNAME',
-      credential: 'YOUR_METERED_PASSWORD'
-    }];
+// Call Duration Timer & Web Audio States
+let callTimerInterval = null;
+let callStartTime = 0;
+let audioCtx = null;
+let outgoingToneInterval = null;
 
+// Socket-style Clean Hostname Generator
+function getDeviceHostName() {
+  const ua = navigator.userAgent;
+  let os = "PC";
+  if (ua.includes("Win")) os = "Windows-PC";
+  else if (ua.includes("Mac")) os = "macOS-Device";
+  else if (ua.includes("Linux")) os = "Linux-Workstation";
+  else if (ua.includes("Android")) os = "Android-Device";
+  else if (ua.includes("iPhone") || ua.includes("iPad")) os = "iOS-Device";
+
+  const hostId = Math.floor(1000 + Math.random() * 9000);
+  return `${os}-${hostId}`;
+}
+
+const deviceName = getDeviceHostName();
+
+// Audio Context Helper
+function getAudioContext() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+
+// Outgoing Dial Tone (Synthesized Ringback Tone)
+function playOutgoingDialTone() {
+  stopOutgoingDialTone();
+  try {
+    const ctx = getAudioContext();
+    const playBeep = () => {
+      try {
+        const osc1 = ctx.createOscillator();
+        const osc2 = ctx.createOscillator();
+        const gain = ctx.createGain();
+
+        // Standard 440 Hz + 480 Hz US dual ringback tone
+        osc1.frequency.value = 440;
+        osc2.frequency.value = 480;
+        gain.gain.value = 0.05; // Smooth volume
+
+        osc1.connect(gain);
+        osc2.connect(gain);
+        gain.connect(ctx.destination);
+
+        osc1.start();
+        osc2.start();
+
+        // 1.5 seconds ring duration
+        setTimeout(() => {
+          try {
+            osc1.stop();
+            osc2.stop();
+          } catch (e) {}
+        }, 1500);
+      } catch (e) {
+        console.warn('Outgoing tone play error:', e);
+      }
+    };
+
+    playBeep();
+    // Repeat ringback tone every 4.5 seconds until answered
+    outgoingToneInterval = setInterval(playBeep, 4500);
+  } catch (e) {
+    console.warn('Audio Context init error:', e);
+  }
+}
+
+function stopOutgoingDialTone() {
+  if (outgoingToneInterval) {
+    clearInterval(outgoingToneInterval);
+    outgoingToneInterval = null;
+  }
+}
+
+// Incoming Audio Ringtone (HTML5 Audio Element)
+function playRingtone() {
+  const audio = document.getElementById('incoming-ringtone');
+  if (audio) {
+    audio.currentTime = 0;
+    audio.play().catch(err => console.warn('Ringtone autoplay prevented by browser:', err));
+  }
+}
+
+function stopRingtone() {
+  const audio = document.getElementById('incoming-ringtone');
+  if (audio) {
+    audio.pause();
+    audio.currentTime = 0;
+  }
+}
+
+// Synthesized Hangup / Disconnect Tone
+function playHangupSound() {
+  stopRingtone();
+  stopOutgoingDialTone();
+  try {
+    const ctx = getAudioContext();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.frequency.setValueAtTime(400, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(150, ctx.currentTime + 0.3);
+    gain.gain.setValueAtTime(0.12, ctx.currentTime);
+    gain.gain.linearRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.3);
+  } catch (e) {
+    console.warn('Hangup audio effect error:', e);
+  }
+}
+
+// Live Call Duration Timer
+function startCallTimer() {
+  stopCallTimer();
+  callStartTime = Date.now();
+  const timerDisplay = document.getElementById('call-timer');
+  if (timerDisplay) {
+    timerDisplay.innerText = '00:00';
+    timerDisplay.classList.remove('hidden');
+  }
+
+  callTimerInterval = setInterval(() => {
+    const elapsedSeconds = Math.floor((Date.now() - callStartTime) / 1000);
+    const mins = String(Math.floor(elapsedSeconds / 60)).padStart(2, '0');
+    const secs = String(elapsedSeconds % 60).padStart(2, '0');
+    if (timerDisplay) timerDisplay.innerText = `${mins}:${secs}`;
+  }, 1000);
+}
+
+function stopCallTimer() {
+  if (callTimerInterval) {
+    clearInterval(callTimerInterval);
+    callTimerInterval = null;
+  }
+  const timerDisplay = document.getElementById('call-timer');
+  if (timerDisplay) {
+    timerDisplay.innerText = '00:00';
+    timerDisplay.classList.add('hidden');
+  }
+}
+
+// TURN Configuration for Cross-Network Traversal
+// Free Open Relay configuration (No paid account required)
+const configuredTurnServers = [
+  {
+    urls: [
+      "turn:global.relay.metered.ca:80",
+      "turn:global.relay.metered.ca:80?transport=tcp",
+      "turn:global.relay.metered.ca:443",
+      "turn:global.relay.metered.ca:443?transport=tcp",
+      "turns:global.relay.metered.ca:443?transport=tcp"
+    ],
+    username: "60b228feb645cbed739f45c6",
+    credential: "wkm4mKVNthCS53Rp"
+  }
+];
 const rtcConfig = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -26,23 +176,29 @@ const rtcConfig = {
     ...configuredTurnServers
   ]
 };
+// const rtcConfig = {
+//   iceTransportPolicy: 'relay', // <-- FORCES WebRTC to ONLY use TURN servers
+//   iceServers: [
+//     { urls: 'stun:stun.l.google.com:19302' },
+//     ...configuredTurnServers
+//   ]
+// };
 
-// Extract Room ID and Device Identifier
+// URL Params & Room Setup
 const urlParams = new URLSearchParams(window.location.search);
 const roomId = urlParams.get('room') || 'default-room';
-const deviceName = navigator.userAgentData?.platform || (navigator.userAgent.includes('Mobile') ? 'Mobile Device' : 'Desktop Browser');
-
-document.getElementById('room-id-display').innerText = `Room: ${roomId}`;
+const roomIdDisplay = document.getElementById('room-id-display');
+if (roomIdDisplay) roomIdDisplay.innerText = `Room: ${roomId}`;
 
 // WebSocket Signaling Server Connection
 const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
 
 ws.onopen = () => {
-  document.getElementById('status-text').innerText = 'Connected to Server';
+  const statusText = document.getElementById('status-text');
+  if (statusText) statusText.innerText = 'Connected to Server';
   ws.send(JSON.stringify({ type: 'join', roomId, deviceName }));
 
-  // Prevent Cloudflare 100s idle WebSocket disconnect
   if (heartbeatInterval) clearInterval(heartbeatInterval);
   heartbeatInterval = setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) {
@@ -69,7 +225,7 @@ ws.onmessage = async (event) => {
   }
 };
 
-// Request Camera / Microphone Stream
+// Media Stream Access
 async function getMedia(callType = currentCallType) {
   currentCallType = callType === 'voice' ? 'voice' : 'video';
   const enableVideo = currentCallType === 'video';
@@ -96,7 +252,7 @@ async function getMedia(callType = currentCallType) {
   }
 }
 
-// Instantiate Peer Connection
+// Peer Connection Setup
 function createPeerConnection() {
   if (peerConnection) {
     peerConnection.ontrack = null;
@@ -106,26 +262,22 @@ function createPeerConnection() {
     peerConnection = null;
   }
 
-  if (!localStream) throw new Error('Local media must be captured before creating the peer connection.');
+  if (!localStream) throw new Error('Local media must be captured before creating peer connection.');
 
   const pc = new RTCPeerConnection(rtcConfig);
   peerConnection = pc;
   localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
   pc.onicecandidate = (event) => {
-    if (event.candidate) {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'candidate', candidate: event.candidate, roomId }));
-      }
+    if (event.candidate && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'candidate', candidate: event.candidate, roomId }));
     }
   };
 
   pc.ontrack = (event) => {
     const remoteVideo = document.getElementById('remoteVideo');
-    if (!remoteVideo) {
-      console.error('Remote video element was not found.');
-      return;
-    }
+    const waitingOverlay = document.getElementById('waiting-overlay');
+    if (!remoteVideo) return;
 
     try {
       if (event.streams && event.streams[0]) {
@@ -137,6 +289,8 @@ function createPeerConnection() {
         }
         remoteVideo.srcObject = remoteStream;
       }
+
+      if (waitingOverlay) waitingOverlay.classList.add('hidden');
       remoteVideo.play().catch(err => console.error('Could not play remote media:', err));
     } catch (err) {
       console.error('Could not attach remote media stream:', err);
@@ -148,25 +302,24 @@ function createPeerConnection() {
 
   pc.onconnectionstatechange = () => {
     const statusText = document.getElementById('status-text');
+    const waitingOverlay = document.getElementById('waiting-overlay');
     console.log('Peer connection state:', pc.connectionState);
 
     if (pc.connectionState === 'connected') {
+      stopOutgoingDialTone(); // Silence outgoing dial tone once media connects
       if (disconnectTimer) {
         clearTimeout(disconnectTimer);
         disconnectTimer = null;
       }
-      statusText.innerText = `Connected (${currentCallType.toUpperCase()} call with ${remoteDeviceName})`;
+      if (statusText) statusText.innerText = `Connected (${currentCallType.toUpperCase()} call with ${remoteDeviceName})`;
+      if (waitingOverlay) waitingOverlay.classList.add('hidden');
+      
+      startCallTimer();
     } else if (pc.connectionState === 'disconnected') {
-      statusText.innerText = 'Reconnecting call...';
-      console.warn('Temporary media disconnection detected. Waiting for auto-recovery...');
-
-      // Allow 10 seconds for WebRTC to re-establish media flow before tearing down
+      if (statusText) statusText.innerText = 'Reconnecting call...';
       if (!disconnectTimer) {
         disconnectTimer = setTimeout(() => {
-          if (peerConnection && pc.connectionState === 'disconnected') {
-            console.error('Reconnection timed out.');
-            endCall(false);
-          }
+          if (peerConnection && pc.connectionState === 'disconnected') endCall(false);
         }, 10000);
       }
     } else if (['failed', 'closed'].includes(pc.connectionState)) {
@@ -178,7 +331,7 @@ function createPeerConnection() {
   return pc;
 }
 
-// Call Action Triggers
+// Call Handlers
 async function startCall(callType) {
   currentCallType = callType === 'voice' ? 'voice' : 'video';
   iceCandidateQueue = [];
@@ -198,9 +351,13 @@ async function startCall(callType) {
       roomId
     }));
 
-    document.getElementById('status-text').innerText = `Calling... (${currentCallType.toUpperCase()})`;
-    document.getElementById('lobby-controls').classList.add('hidden');
-    document.getElementById('incall-controls').classList.remove('hidden');
+    const statusText = document.getElementById('status-text');
+    if (statusText) statusText.innerText = `Calling... (${currentCallType.toUpperCase()})`;
+    document.getElementById('lobby-controls')?.classList.add('hidden');
+    document.getElementById('incall-controls')?.classList.remove('hidden');
+
+    // Play synthesized outgoing dial tone while waiting for answer
+    playOutgoingDialTone();
   } catch (err) {
     console.error('Error starting call:', err);
     endCall(false);
@@ -209,23 +366,25 @@ async function startCall(callType) {
 
 async function handleOffer(data, acceptedPeerConnection = null) {
   if (!acceptedPeerConnection) {
-    if (!data || !data.offer) {
-      console.error('Received an offer without a session description.');
-      return;
-    }
+    if (!data || !data.offer) return;
 
-    // Clean up stale or existing peer connections before processing a new incoming offer
     if (peerConnection) {
       peerConnection.close();
       peerConnection = null;
     }
 
+    iceCandidateQueue = [];
     pendingOffer = data;
     currentCallType = data.callType === 'voice' ? 'voice' : 'video';
     remoteDeviceName = data.deviceName || 'Remote Peer';
-    document.getElementById('incoming-type-text').innerText = `Incoming ${currentCallType.toUpperCase()} Call`;
-    document.getElementById('caller-name').innerText = `From: ${remoteDeviceName}`;
-    document.getElementById('incoming-modal').classList.remove('hidden');
+
+    const incomingType = document.getElementById('incoming-type-text');
+    const callerName = document.getElementById('caller-name');
+    if (incomingType) incomingType.innerText = `Incoming ${currentCallType.toUpperCase()} Call`;
+    if (callerName) callerName.innerText = `From: ${remoteDeviceName}`;
+
+    document.getElementById('incoming-modal')?.classList.remove('hidden');
+    playRingtone();
     return;
   }
 
@@ -233,15 +392,16 @@ async function handleOffer(data, acceptedPeerConnection = null) {
     await acceptedPeerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
     await processBufferedCandidates(acceptedPeerConnection);
   } catch (err) {
-    console.error('Error setting remote offer or applying queued ICE candidates:', err);
+    console.error('Error setting remote offer:', err);
     endCall(false);
     throw err;
   }
 }
 
 async function acceptCall() {
+  stopRingtone();
   try {
-    if (!pendingOffer) throw new Error('There is no incoming offer to accept.');
+    if (!pendingOffer) throw new Error('No incoming offer to accept.');
 
     if (!await getMedia(currentCallType)) return;
 
@@ -257,13 +417,13 @@ async function acceptCall() {
       answer: pc.localDescription,
       callType: currentCallType,
       deviceName,
-      roomId: roomId
+      roomId
     }));
 
     pendingOffer = null;
-    document.getElementById('incoming-modal').classList.add('hidden');
-    document.getElementById('lobby-controls').classList.add('hidden');
-    document.getElementById('incall-controls').classList.remove('hidden');
+    document.getElementById('incoming-modal')?.classList.add('hidden');
+    document.getElementById('lobby-controls')?.classList.add('hidden');
+    document.getElementById('incall-controls')?.classList.remove('hidden');
   } catch (err) {
     console.error('Error accepting call:', err);
     endCall(false);
@@ -271,7 +431,9 @@ async function acceptCall() {
 }
 
 function rejectCall() {
-  document.getElementById('incoming-modal').classList.add('hidden');
+  stopRingtone();
+  playHangupSound();
+  document.getElementById('incoming-modal')?.classList.add('hidden');
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'reject', roomId }));
   }
@@ -280,8 +442,9 @@ function rejectCall() {
 }
 
 async function handleAnswer(data) {
+  stopOutgoingDialTone(); // Stop outgoing tone when answer is received
   try {
-    if (!peerConnection) throw new Error('Cannot apply an answer without an active peer connection.');
+    if (!peerConnection) throw new Error('Cannot apply answer without active peer connection.');
     const pc = peerConnection;
     if (data.deviceName) remoteDeviceName = data.deviceName;
     await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
@@ -302,19 +465,18 @@ async function handleCandidate(data) {
       iceCandidateQueue.push(candidate);
     }
   } catch (err) {
-    console.warn('Non-fatal ICE candidate error:', err);
+    console.warn('Non-fatal candidate error:', err);
   }
 }
 
 async function processBufferedCandidates(pc = peerConnection) {
   if (!pc || !pc.remoteDescription) return;
-
   while (iceCandidateQueue.length > 0) {
     const candidate = iceCandidateQueue.shift();
     try {
       await pc.addIceCandidate(candidate);
     } catch (err) {
-      console.warn('Ignored non-fatal buffered candidate error:', err);
+      console.warn('Ignored candidate buffer error:', err);
     }
   }
 }
@@ -322,24 +484,22 @@ async function processBufferedCandidates(pc = peerConnection) {
 function toggleMute() {
   if (localStream) {
     const audioTrack = localStream.getAudioTracks()[0];
-    if (audioTrack) {
-      audioTrack.enabled = !audioTrack.enabled;
-      document.getElementById('mute-btn').innerText = audioTrack.enabled ? 'Mute Audio' : 'Unmute Audio';
-    }
+    if (audioTrack) audioTrack.enabled = !audioTrack.enabled;
   }
 }
 
 function toggleCamera() {
   if (localStream) {
     const videoTrack = localStream.getVideoTracks()[0];
-    if (videoTrack) {
-      videoTrack.enabled = !videoTrack.enabled;
-      document.getElementById('camera-btn').innerText = videoTrack.enabled ? 'Disable Camera' : 'Enable Camera';
-    }
+    if (videoTrack) videoTrack.enabled = !videoTrack.enabled;
   }
 }
 
 function endCall(notifyRemote = true) {
+  stopRingtone();
+  stopOutgoingDialTone();
+  playHangupSound();
+
   if (notifyRemote && ws && ws.readyState === WebSocket.OPEN) {
     try {
       ws.send(JSON.stringify({ type: 'hangup', roomId }));
@@ -365,32 +525,28 @@ function endCall(notifyRemote = true) {
 }
 
 function handleRemoteHangup() {
-  if (peerConnection) {
-    peerConnection.ontrack = null;
-    peerConnection.onicecandidate = null;
-    peerConnection.onconnectionstatechange = null;
-    peerConnection.close();
-    peerConnection = null;
-  }
-
-  if (localStream) {
-    localStream.getTracks().forEach(track => track.stop());
-    localStream = null;
-  }
-
-  resetCallUI();
+  endCall(false);
 }
 
 function resetCallUI() {
+  stopCallTimer();
+  stopRingtone();
+  stopOutgoingDialTone();
+
   pendingOffer = null;
   iceCandidateQueue = [];
   currentCallType = 'video';
   remoteDeviceName = 'Remote Peer';
-  document.getElementById('status-text').innerText = 'Call Ended';
-  document.getElementById('incoming-modal').classList.add('hidden');
-  document.getElementById('video-container').classList.add('hidden');
-  document.getElementById('incall-controls').classList.add('hidden');
-  document.getElementById('lobby-controls').classList.remove('hidden');
+
+  const statusText = document.getElementById('status-text');
+  const waitingOverlay = document.getElementById('waiting-overlay');
+  if (statusText) statusText.innerText = 'Call Ended';
+  if (waitingOverlay) waitingOverlay.classList.remove('hidden');
+
+  document.getElementById('incoming-modal')?.classList.add('hidden');
+  document.getElementById('video-container')?.classList.add('hidden');
+  document.getElementById('incall-controls')?.classList.add('hidden');
+  document.getElementById('lobby-controls')?.classList.remove('hidden');
 
   const localVideo = document.getElementById('localVideo');
   const remoteVideo = document.getElementById('remoteVideo');
